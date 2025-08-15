@@ -99,8 +99,8 @@ parse' acc stp ("nil" : tok) = parse' (SalLit SalNil : acc) stp tok
 parse' acc stp ("true" : tok) = parse' (SalLit (SalBool True) : acc) stp tok
 parse' acc stp ("false" : tok) = parse' (SalLit (SalBool False) : acc) stp tok
 parse' acc stp (('"' : str) : tok) = parse' (SalLit (SalString (init str)) : acc) stp tok
-parse' acc stp ("(" : kw : tok) = parse' (SalExp (kw, ast) : acc) stp tok' where (ast, tok') = parse' [] ")" tok
-parse' acc stp ("[" : tok) = parse' (SalLitList ast : acc) stp tok' where (ast, tok') = parse' [] "]" tok
+parse' acc stp ("(" : kw : tok) = let (ast, tok') = parse' [] ")" tok in parse' (SalExp (kw, ast) : acc) stp tok'
+parse' acc stp ("[" : tok) = let (ast, tok') = parse' [] "]" tok in parse' (SalLitList ast : acc) stp tok'
 parse' acc stp (t : tok)
   | t == stp = (reverse acc, tok)
   | parse'isNumber t = parse' (SalLit (SalNumber (read t)) : acc) stp tok
@@ -119,6 +119,31 @@ parse'isKeyword token@(h : _) = not (isDigit h) && all isAlphaNumSym token
  where
   isAlphaNumSym n = isAlphaNum n || Set.member n keywordSymbols
   keywordSymbols = Set.fromList "_+-*/<>='"
+
+--------------------------------------------------------------------------------
+-- RUNNER
+--------------------------------------------------------------------------------
+
+run :: SalEnv -> [SalAst] -> IO [SalVal]
+run = run' []
+
+run' :: [SalVal] -> SalEnv -> [SalAst] -> IO [SalVal]
+run' acc env [] = pure $ reverse acc
+run' acc env (SalLit val : ast) = run' (val : acc) env ast
+run' acc env (SalLitList ast' : ast) = run env ast' >>= \list -> run' (SalList list : acc) env ast
+run' acc env (SalExp (kw, ast') : ast) = run'exp env kw ast' >>= \(env', val') -> run' (val' ++ acc) env' ast
+run' acc env (SalRef kw : ast) = run' (run'ref env kw : acc) env ast
+
+run'exp :: SalEnv -> SalKwI -> [SalAst] -> IO (SalEnv, [SalVal])
+run'exp env kw ast = case Map.lookup kw env of
+  Just (SalFunction fn) -> run env ast >>= fn >>= \val -> pure (env, [val])
+  Just (SalMacro mc) -> mc env ast >>= \(env', ast') -> run env' ast' >>= \vals -> pure (env', vals)
+  _ -> error "RuntimeError: Is not a function or macro"
+
+run'ref :: SalEnv -> SalKwI -> SalVal
+run'ref env kw = case Map.lookup kw env of
+  Just val -> val
+  Nothing -> error "RuntimeError: Undefined variable"
 
 --------------------------------------------------------------------------------
 -- PRELUDE
@@ -151,8 +176,7 @@ sal'if env [cond, true] = sal'if env [cond, true, SalLit SalNil]
 sal'if env [cond, true, false] = run env [cond] >>= \[val] -> pure (env, if sal'castBool val then [true] else [false])
 
 sal'fn :: SalMcI
-sal'fn env (SalLitList args : ast@(_ : _)) =
-  pure (env, [SalLit (SalFunction function)])
+sal'fn env (SalLitList args : ast@(_ : _)) = pure (env, [SalLit (SalFunction function)])
  where
   function args' = last <$> run (env' args') ast
   env' args' = foldl map' env $ zip args args'
@@ -162,7 +186,7 @@ sal'def :: SalMcI
 sal'def env [SalRef kw, ast] = run env [ast] >>= \[val] -> pure (Map.insert kw val env, [SalLit (SalKeyword kw)])
 
 sal'defn :: SalMcI
-sal'defn env (ref : ast) = sal'fn env ast >>= \(env', ast') -> sal'def env' (ref : ast')
+sal'defn env (ref@(SalRef _) : ast@(args@(SalLitList _) : (_ : _))) = sal'fn env ast >>= \(env', ast') -> sal'def env' (ref : ast')
 
 -- Functions
 
@@ -203,6 +227,9 @@ sal'max = sal'number . maximum . map sal'castNumber
 sal'min :: SalFnI
 sal'min = sal'number . minimum . map sal'castNumber
 
+sal'eq :: SalFnI
+sal'eq [a, b] = sal'bool $ a == b
+
 sal'gt :: SalFnI
 sal'gt [SalNumber a, SalNumber b] = sal'bool $ a > b
 sal'gte :: SalFnI
@@ -213,17 +240,15 @@ sal'lt [SalNumber a, SalNumber b] = sal'bool $ a < b
 sal'lte :: SalFnI
 sal'lte [SalNumber a, SalNumber b] = sal'bool $ a <= b
 
-sal'eq :: SalFnI
-sal'eq [a, b] = sal'bool $ a == b
-sal'not :: SalFnI
-sal'not [value] = sal'bool . not $ sal'castBool value
-sal'noteq :: SalFnI
-sal'noteq [a, b] = sal'eq [a, b] >>= \c -> sal'not [c]
-
 sal'or :: SalFnI
 sal'or = sal'bool . any sal'castBool
 sal'and :: SalFnI
 sal'and = sal'bool . all sal'castBool
+
+sal'not :: SalFnI
+sal'not [value] = sal'bool . not $ sal'castBool value
+sal'noteq :: SalFnI
+sal'noteq [a, b] = sal'eq [a, b] >>= \c -> sal'not [c]
 
 sal'nil :: SalFnI
 sal'nil [val] = sal'bool $ val == SalNil
@@ -248,42 +273,17 @@ prelude =
     , ("dec", SalFunction sal'dec)
     , ("max", SalFunction sal'max)
     , ("min", SalFunction sal'min)
+    , ("=", SalFunction sal'eq)
     , (">", SalFunction sal'gt)
     , (">=", SalFunction sal'gte)
     , ("<", SalFunction sal'lt)
     , ("<=", SalFunction sal'lte)
-    , ("=", SalFunction sal'eq)
-    , ("not", SalFunction sal'not)
-    , ("not=", SalFunction sal'noteq)
     , ("or", SalFunction sal'or)
     , ("and", SalFunction sal'and)
+    , ("not", SalFunction sal'not)
+    , ("not=", SalFunction sal'noteq)
     , ("nil?", SalFunction sal'nil)
     ]
-
---------------------------------------------------------------------------------
--- RUNNER
---------------------------------------------------------------------------------
-
-run :: SalEnv -> [SalAst] -> IO [SalVal]
-run = run' []
-
-run' :: [SalVal] -> SalEnv -> [SalAst] -> IO [SalVal]
-run' acc env [] = pure $ reverse acc
-run' acc env (SalLit val : ast) = run' (val : acc) env ast
-run' acc env (SalLitList ast' : ast) = run env ast' >>= \list -> run' (SalList list : acc) env ast
-run' acc env (SalExp (kw, ast') : ast) = run'exp env kw ast' >>= \(env', val') -> run' (val' ++ acc) env' ast
-run' acc env (SalRef kw : ast) = run' (run'ref env kw : acc) env ast
-
-run'ref :: SalEnv -> SalKwI -> SalVal
-run'ref env kw = case Map.lookup kw env of
-  Just val -> val
-  Nothing -> error "RuntimeError: Undefined variable"
-
-run'exp :: SalEnv -> SalKwI -> [SalAst] -> IO (SalEnv, [SalVal])
-run'exp env kw ast = case Map.lookup kw env of
-  Just (SalFunction fn) -> run env ast >>= fn >>= \val -> pure (env, [val])
-  Just (SalMacro mc) -> mc env ast >>= \(env', ast') -> run env' ast' >>= \vals -> pure (env', vals)
-  _ -> error "RuntimeError: Is not a function or macro"
 
 --------------------------------------------------------------------------------
 -- MAIN

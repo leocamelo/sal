@@ -1,6 +1,7 @@
 import Data.Char (isAlphaNum, isDigit, isSpace)
 import Data.Fixed (mod')
 import Data.List (findIndex)
+
 import Data.Map qualified as Map
 import Data.Set qualified as Set
 
@@ -17,7 +18,7 @@ data SalVal
   | SalNumber Double
   | SalString String
   | SalList [SalVal]
-  | SalKeyword String
+  | SalKeyword SalKwI
   | SalFunction SalFnI
   | SalMacro SalMcI
 
@@ -45,13 +46,14 @@ instance Eq SalVal where
 data SalAst
   = SalLit SalVal
   | SalLitList [SalAst]
-  | SalExp (String, [SalAst])
-  | SalRef String
+  | SalExp (SalKwI, [SalAst])
+  | SalRef SalKwI
 
-type SalEnv = Map.Map String SalVal
-
+type SalKwI = String
 type SalFnI = [SalVal] -> IO SalVal
 type SalMcI = SalEnv -> [SalAst] -> IO (SalEnv, [SalAst])
+
+type SalEnv = Map.Map SalKwI SalVal
 
 --------------------------------------------------------------------------------
 -- TOKENIZER
@@ -64,11 +66,9 @@ tokenize' :: [String] -> String -> String -> [String]
 tokenize' acc buf "" = reverse $ tokenize'flush acc buf
 tokenize' acc buf (c : code)
   | c == '"' = let (str, code') = tokenize'string code in tokenize' ((c : str) : tokenize'flush acc buf) "" code'
-  | Set.member c brackets = tokenize' ([c] : tokenize'flush acc buf) "" code
+  | Set.member c tokenize'brackets = tokenize' ([c] : tokenize'flush acc buf) "" code
   | isSpace c = tokenize' (tokenize'flush acc buf) "" code
   | otherwise = tokenize' acc (c : buf) code
- where
-  brackets = Set.fromList "()[]{}"
 
 tokenize'flush :: [String] -> String -> [String]
 tokenize'flush acc "" = acc
@@ -78,10 +78,13 @@ tokenize'string :: String -> (String, String)
 tokenize'string ('"' : code) = (['"'], code)
 tokenize'string code = case findIndex quote $ unpack code of
   Just index -> splitAt (index + 2) code
-  Nothing -> error "String not closed"
+  Nothing -> error "ParseError: String not closed"
  where
   quote (a, b) = a /= '\\' && b == '"'
   unpack str = zip str $ drop 1 str
+
+tokenize'brackets :: Set.Set Char
+tokenize'brackets = Set.fromList "()[]{}"
 
 --------------------------------------------------------------------------------
 -- PARSER
@@ -100,12 +103,21 @@ parse' acc stp ("(" : kw : tok) = parse' (SalExp (kw, ast) : acc) stp tok' where
 parse' acc stp ("[" : tok) = parse' (SalLitList ast : acc) stp tok' where (ast, tok') = parse' [] "]" tok
 parse' acc stp (t : tok)
   | t == stp = (reverse acc, tok)
-  | isNumber t = parse' (SalLit (SalNumber (read t)) : acc) stp tok
-  | isKeyword t = parse' (SalRef t : acc) stp tok
-  | otherwise = error "Syntax error"
+  | parse'isNumber t = parse' (SalLit (SalNumber (read t)) : acc) stp tok
+  | parse'isKeyword t = parse' (SalRef t : acc) stp tok
+  | otherwise = error "ParseError: Syntax error"
+
+parse'isNumber :: String -> Bool
+parse'isNumber (h : t) = isDigitNeg h && all isDigitDot t && dotCount t <= 1
  where
-  isNumber (h : t) = (isDigit h || h == '-') && all (\d -> isDigit d || '.' == d) t && (length . filter (== '.')) t <= 1
-  isKeyword token@(h : _) = not (isDigit h) && all (\c -> isAlphaNum c || Set.member c keywordSymbols) token
+  isDigitNeg n = isDigit n || n == '-'
+  isDigitDot n = isDigit n || n == '.'
+  dotCount = length . filter (== '.')
+
+parse'isKeyword :: String -> Bool
+parse'isKeyword token@(h : _) = not (isDigit h) && all isAlphaNumSym token
+ where
+  isAlphaNumSym n = isAlphaNum n || Set.member n keywordSymbols
   keywordSymbols = Set.fromList "_+-*/<>='"
 
 --------------------------------------------------------------------------------
@@ -121,13 +133,16 @@ sal'castBool _ = True
 
 sal'castNumber :: SalVal -> Double
 sal'castNumber (SalNumber number) = number
-sal'castNumber _ = error "Not a number"
+sal'castNumber _ = error "RuntimeError: Not a number"
 
 sal'bool :: Bool -> IO SalVal
 sal'bool = pure . SalBool
 
 sal'number :: Double -> IO SalVal
 sal'number = pure . SalNumber
+
+sal'keyword :: SalKwI -> IO SalVal
+sal'keyword = pure . SalKeyword
 
 -- Macros
 
@@ -155,7 +170,7 @@ sal'println :: SalFnI
 sal'println values = putStrLn (unwords $ map show values) >> return SalNil
 
 sal'type :: SalFnI
-sal'type [val] = pure . SalKeyword $ typeOf val
+sal'type [val] = sal'keyword $ typeOf val
  where
   typeOf SalNil = "nil"
   typeOf (SalBool _) = "bool"
@@ -198,17 +213,17 @@ sal'lt [SalNumber a, SalNumber b] = sal'bool $ a < b
 sal'lte :: SalFnI
 sal'lte [SalNumber a, SalNumber b] = sal'bool $ a <= b
 
+sal'eq :: SalFnI
+sal'eq [a, b] = sal'bool $ a == b
+sal'not :: SalFnI
+sal'not [value] = sal'bool . not $ sal'castBool value
+sal'noteq :: SalFnI
+sal'noteq [a, b] = sal'eq [a, b] >>= \c -> sal'not [c]
+
 sal'or :: SalFnI
 sal'or = sal'bool . any sal'castBool
 sal'and :: SalFnI
 sal'and = sal'bool . all sal'castBool
-sal'not :: SalFnI
-sal'not [value] = sal'bool . not $ sal'castBool value
-
-sal'eq :: SalFnI
-sal'eq [a, b] = sal'bool $ a == b
-sal'noteq :: SalFnI
-sal'noteq [a, b] = sal'eq [a, b] >>= \c -> sal'not [c]
 
 sal'nil :: SalFnI
 sal'nil [val] = sal'bool $ val == SalNil
@@ -238,10 +253,10 @@ prelude =
     , ("<", SalFunction sal'lt)
     , ("<=", SalFunction sal'lte)
     , ("=", SalFunction sal'eq)
-    , ("or", SalFunction sal'or)
-    , ("and", SalFunction sal'and)
     , ("not", SalFunction sal'not)
     , ("not=", SalFunction sal'noteq)
+    , ("or", SalFunction sal'or)
+    , ("and", SalFunction sal'and)
     , ("nil?", SalFunction sal'nil)
     ]
 
@@ -259,16 +274,16 @@ run' acc env (SalLitList ast' : ast) = run env ast' >>= \list -> run' (SalList l
 run' acc env (SalExp (kw, ast') : ast) = run'exp env kw ast' >>= \(env', val') -> run' (val' ++ acc) env' ast
 run' acc env (SalRef kw : ast) = run' (run'ref env kw : acc) env ast
 
-run'ref :: SalEnv -> String -> SalVal
+run'ref :: SalEnv -> SalKwI -> SalVal
 run'ref env kw = case Map.lookup kw env of
   Just val -> val
-  Nothing -> error "Undefined variable"
+  Nothing -> error "RuntimeError: Undefined variable"
 
-run'exp :: SalEnv -> String -> [SalAst] -> IO (SalEnv, [SalVal])
+run'exp :: SalEnv -> SalKwI -> [SalAst] -> IO (SalEnv, [SalVal])
 run'exp env kw ast = case Map.lookup kw env of
   Just (SalFunction fn) -> run env ast >>= fn >>= \val -> pure (env, [val])
   Just (SalMacro mc) -> mc env ast >>= \(env', ast') -> run env' ast' >>= \vals -> pure (env', vals)
-  _ -> error "Is not a function or macro"
+  _ -> error "RuntimeError: Is not a function or macro"
 
 --------------------------------------------------------------------------------
 -- MAIN

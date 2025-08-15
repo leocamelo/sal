@@ -19,8 +19,8 @@ data SalVal
   | SalString String
   | SalList [SalVal]
   | SalKeyword SalKwI
-  | SalFunction SalFnI
   | SalMacro SalMcI
+  | SalFunction SalFnI
 
 instance Show SalVal where
   show :: SalVal -> String
@@ -30,8 +30,8 @@ instance Show SalVal where
   show (SalString string) = string
   show (SalList list) = "[" ++ unwords (map show list) ++ "]"
   show (SalKeyword keyword) = ':' : keyword
-  show (SalFunction _function) = "<function>"
   show (SalMacro _macro) = "<macro>"
+  show (SalFunction _function) = "<function>"
 
 instance Eq SalVal where
   (==) :: SalVal -> SalVal -> Bool
@@ -124,20 +124,20 @@ parse'isKeyword token@(h : _) = not (isDigit h) && all isAlphaNumSym token
 -- RUNNER
 --------------------------------------------------------------------------------
 
-run :: SalEnv -> [SalAst] -> IO [SalVal]
+run :: SalEnv -> [SalAst] -> IO (SalEnv, [SalVal])
 run = run' []
 
-run' :: [SalVal] -> SalEnv -> [SalAst] -> IO [SalVal]
-run' acc env [] = pure $ reverse acc
+run' :: [SalVal] -> SalEnv -> [SalAst] -> IO (SalEnv, [SalVal])
+run' acc env [] = pure (env, reverse acc)
 run' acc env (SalLit val : ast) = run' (val : acc) env ast
-run' acc env (SalLitList ast' : ast) = run env ast' >>= \list -> run' (SalList list : acc) env ast
+run' acc env (SalLitList ast' : ast) = run env ast' >>= \(env', list) -> run' (SalList list : acc) env' ast
 run' acc env (SalExp (kw, ast') : ast) = run'exp env kw ast' >>= \(env', val') -> run' (val' ++ acc) env' ast
 run' acc env (SalRef kw : ast) = run' (run'ref env kw : acc) env ast
 
 run'exp :: SalEnv -> SalKwI -> [SalAst] -> IO (SalEnv, [SalVal])
 run'exp env kw ast = case Map.lookup kw env of
-  Just (SalFunction fn) -> run env ast >>= fn >>= \val -> pure (env, [val])
-  Just (SalMacro mc) -> mc env ast >>= \(env', ast') -> run env' ast' >>= \vals -> pure (env', vals)
+  Just (SalMacro mc) -> mc env ast >>= uncurry run
+  Just (SalFunction fn) -> run env ast >>= fn . snd >>= \val -> pure (env, [val])
   _ -> error "RuntimeError: Is not a function or macro"
 
 run'ref :: SalEnv -> SalKwI -> SalVal
@@ -173,20 +173,20 @@ sal'keyword = pure . SalKeyword
 
 sal'if :: SalMcI
 sal'if env [cond, true] = sal'if env [cond, true, SalLit SalNil]
-sal'if env [cond, true, false] = run env [cond] >>= \[val] -> pure (env, if sal'castBool val then [true] else [false])
+sal'if env [cond, true, false] = run env [cond] >>= \(_, [val]) -> pure (env, if sal'castBool val then [true] else [false])
 
 sal'fn :: SalMcI
 sal'fn env ast@(SalLitList _ : (_ : _)) = sal'fn env (SalRef "" : ast)
 sal'fn env (SalRef kw : SalLitList args'keys : ast@(_ : _)) = pure (env, [SalLit fn])
  where
   fn = SalFunction fn'
-  fn' args'values = last <$> run (fn'env args'values) ast
+  fn' args'values = last . snd <$> run (fn'env args'values) ast
   fn'env args'values = foldl env'ref env' $ zip args'keys args'values
   env' = Map.insert "recur" fn $ if kw == "" then env else Map.insert kw fn env
   env'ref e (SalRef k, v) = Map.insert k v e
 
 sal'def :: SalMcI
-sal'def env [SalRef kw, ast] = run env [ast] >>= \[val] -> pure (Map.insert kw val env, [SalLit (SalKeyword kw)])
+sal'def env [SalRef kw, ast] = run env [ast] >>= \(_, [val]) -> pure (Map.insert kw val env, [SalLit (SalKeyword kw)])
 
 sal'defn :: SalMcI
 sal'defn env ast@(ref@(SalRef _) : (args@(SalLitList _) : (_ : _))) = sal'fn env ast >>= \(env', ast') -> sal'def env' (ref : ast')
@@ -194,7 +194,7 @@ sal'defn env ast@(ref@(SalRef _) : (args@(SalLitList _) : (_ : _))) = sal'fn env
 -- Functions
 
 sal'println :: SalFnI
-sal'println values = putStrLn (unwords $ map show values) >> return SalNil
+sal'println values = putStrLn (unwords $ map show values) >> pure SalNil
 
 sal'type :: SalFnI
 sal'type [val] = sal'keyword $ typeOf val
@@ -205,8 +205,8 @@ sal'type [val] = sal'keyword $ typeOf val
   typeOf (SalString _) = "string"
   typeOf (SalList _) = "list"
   typeOf (SalKeyword _) = "keyword"
-  typeOf (SalFunction _) = "function"
   typeOf (SalMacro _) = "macro"
+  typeOf (SalFunction _) = "function"
 
 sal'sum :: SalFnI
 sal'sum = sal'number . sum . map sal'castNumber
@@ -293,7 +293,10 @@ prelude =
 --------------------------------------------------------------------------------
 
 eval :: String -> IO [SalVal]
-eval = run prelude . parse . tokenize
+eval code = snd <$> eval' prelude code
+
+eval' :: SalEnv -> String -> IO (SalEnv, [SalVal])
+eval' env = run env . parse . tokenize
 
 main :: IO ()
 main = do

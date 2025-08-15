@@ -176,17 +176,20 @@ sal'if env [cond, true] = sal'if env [cond, true, SalLit SalNil]
 sal'if env [cond, true, false] = run env [cond] >>= \[val] -> pure (env, if sal'castBool val then [true] else [false])
 
 sal'fn :: SalMcI
-sal'fn env (SalLitList args : ast@(_ : _)) = pure (env, [SalLit (SalFunction function)])
+sal'fn env ast@(SalLitList _ : (_ : _)) = sal'fn env (SalRef "" : ast)
+sal'fn env (SalRef kw : SalLitList args'keys : ast@(_ : _)) = pure (env, [SalLit fn])
  where
-  function args' = last <$> run (env' args') ast
-  env' args' = foldl map' env $ zip args args'
-  map' e (SalRef k, v) = Map.insert k v e
+  fn = SalFunction fn'
+  fn' args'values = last <$> run (fn'env args'values) ast
+  fn'env args'values = foldl env'ref env' $ zip args'keys args'values
+  env' = Map.insert "recur" fn $ if kw == "" then env else Map.insert kw fn env
+  env'ref e (SalRef k, v) = Map.insert k v e
 
 sal'def :: SalMcI
 sal'def env [SalRef kw, ast] = run env [ast] >>= \[val] -> pure (Map.insert kw val env, [SalLit (SalKeyword kw)])
 
 sal'defn :: SalMcI
-sal'defn env (ref@(SalRef _) : ast@(args@(SalLitList _) : (_ : _))) = sal'fn env ast >>= \(env', ast') -> sal'def env' (ref : ast')
+sal'defn env ast@(ref@(SalRef _) : (args@(SalLitList _) : (_ : _))) = sal'fn env ast >>= \(env', ast') -> sal'def env' (ref : ast')
 
 -- Functions
 

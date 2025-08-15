@@ -173,7 +173,7 @@ sal'keyword = pure . SalKeyword
 
 sal'if :: SalMcI
 sal'if env [cond, true] = sal'if env [cond, true, SalLit SalNil]
-sal'if env [cond, true, false] = run env [cond] >>= \(_, [val]) -> pure (env, if sal'castBool val then [true] else [false])
+sal'if env [cond, true, false] = run env [cond] >>= \(env', [val]) -> pure (env', if sal'castBool val then [true] else [false])
 
 sal'fn :: SalMcI
 sal'fn env ast@(SalLitList _ : (_ : _)) = sal'fn env (SalRef "" : ast)
@@ -186,7 +186,7 @@ sal'fn env (SalRef kw : SalLitList args'keys : ast@(_ : _)) = pure (env, [SalLit
   env'ref e (SalRef k, v) = Map.insert k v e
 
 sal'def :: SalMcI
-sal'def env [SalRef kw, ast] = run env [ast] >>= \(_, [val]) -> pure (Map.insert kw val env, [SalLit (SalKeyword kw)])
+sal'def env [SalRef kw, ast] = run env [ast] >>= \(env', [val]) -> pure (Map.insert kw val env', [SalLit (SalKeyword kw)])
 
 sal'defn :: SalMcI
 sal'defn env ast@(ref@(SalRef _) : (args@(SalLitList _) : (_ : _))) = sal'fn env ast >>= \(env', ast') -> sal'def env' (ref : ast')

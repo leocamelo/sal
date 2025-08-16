@@ -30,7 +30,7 @@ instance Show SalVal where
   show (SalKeyword a) = ':' : a
   show (SalNumber a) = show a
   show (SalString a) = a
-  show (SalList a) = "[" ++ unwords (map show a) ++ "]"
+  show (SalList a) = "[" ++ intercalate ", " (map show a) ++ "]"
   show (SalMap a) = "{" ++ intercalate ", " (map (\(k, v) -> show k ++ " " ++ show v) $ Map.assocs a) ++ "}"
   show (SalMacro _) = "<macro>"
   show (SalFunction _) = "<function>"
@@ -78,10 +78,13 @@ tokenize = tokenize' [] ""
 
 tokenize' :: [String] -> String -> String -> [String]
 tokenize' acc buf "" = reverse $ tokenize'flush acc buf
+tokenize' acc buf code@('"' : _) =
+  let (str, code') = tokenize'string code in tokenize' (str : tokenize'flush acc buf) "" code'
+tokenize' acc buf (';' : code) =
+  tokenize' (tokenize'flush acc buf) "" $ dropWhile (/= '\n') code
 tokenize' acc buf (c : code)
-  | c == '"' = let (str, code') = tokenize'string code in tokenize' ((c : str) : tokenize'flush acc buf) "" code'
   | Set.member c tokenize'brackets = tokenize' ([c] : tokenize'flush acc buf) "" code
-  | isSpace c = tokenize' (tokenize'flush acc buf) "" code
+  | isSpace c || c == ',' = tokenize' (tokenize'flush acc buf) "" code
   | otherwise = tokenize' acc (c : buf) code
 
 tokenize'flush :: [String] -> String -> [String]
@@ -89,10 +92,9 @@ tokenize'flush acc "" = acc
 tokenize'flush acc buf = reverse buf : acc
 
 tokenize'string :: String -> (String, String)
-tokenize'string ('"' : code) = (['"'], code)
 tokenize'string code = case findIndex quote $ unpack code of
   Just index -> splitAt (index + 2) code
-  Nothing -> error "ParseError: String not closed"
+  Nothing -> error "String not closed"
  where
   quote (a, b) = a /= '\\' && b == '"'
   unpack str = zip str $ drop 1 str
@@ -121,7 +123,7 @@ parse' acc bp ("(" : kw : tok) = let (ast, tok') = parse' [] ")" tok in parse' (
 parse' acc bp (t : tok)
   | t == bp = (reverse acc, tok)
   | parse'isNumber t = parse' (SalLit (SalNumber (read t)) : acc) bp tok
-  | parse'isKeyword t = parse' (SalRef t : acc) bp tok
+  | parse'isRef t = parse' (SalRef t : acc) bp tok
   | otherwise = error "Syntax error"
 
 parse'map :: [SalAst] -> [SalAst]
@@ -134,8 +136,8 @@ parse'isNumber (h : t) = isDigitNeg h && all isDigitDot t && dotCount t <= 1
   isDigitDot n = isDigit n || n == '.'
   dotCount = length . filter (== '.')
 
-parse'isKeyword :: String -> Bool
-parse'isKeyword token@(h : _) = not (isDigit h) && all isAlphaNumSym token
+parse'isRef :: String -> Bool
+parse'isRef token@(h : _) = not (isDigit h) && all isAlphaNumSym token
  where
   isAlphaNumSym n = isAlphaNum n || Set.member n keywordSymbols
   keywordSymbols = Set.fromList "_+-*/<>='"
@@ -148,7 +150,7 @@ run :: SalEnv -> [SalAst] -> IO (SalEnv, [SalVal])
 run = run' []
 
 run' :: [SalVal] -> SalEnv -> [SalAst] -> IO (SalEnv, [SalVal])
-run' acc env [] = pure (env, reverse acc)
+run' acc env [] = return (env, reverse acc)
 run' acc env (SalLit val : ast) = run' (val : acc) env ast
 run' acc env (SalLitList ast' : ast) = run env ast' >>= \(env', vals) -> run' (SalList vals : acc) env' ast
 run' acc env (SalLitMap ast' : ast) = run env ast' >>= \(env', vals) -> run' (SalMap (run'map vals) : acc) env' ast
@@ -156,14 +158,14 @@ run' acc env (SalExp (kw, ast') : ast) = run'exp env kw ast' >>= \(env', vals) -
 run' acc env (SalRef kw : ast) = run' (run'ref env kw : acc) env ast
 
 run'map :: [SalVal] -> Map.Map SalVal SalVal
-run'map vals = Map.fromList $ zip (map snd keys) (map snd values)
- where
-  (keys, values) = partition (even . fst) $ zip [0 ..] vals
+run'map vals =
+  let (keys, values) = partition (even . fst) $ zip [0 ..] vals
+   in Map.fromList $ zip (map snd keys) (map snd values)
 
 run'exp :: SalEnv -> SalKwI -> [SalAst] -> IO (SalEnv, [SalVal])
 run'exp env kw ast = case Map.lookup kw env of
   Just (SalMacro mc) -> mc env ast >>= uncurry run
-  Just (SalFunction fn) -> run env ast >>= fn . snd >>= \val -> pure (env, [val])
+  Just (SalFunction fn) -> run env ast >>= fn . snd >>= \val -> return (env, [val])
   _ -> error ("`" ++ kw ++ "` is not a function")
 
 run'ref :: SalEnv -> SalKwI -> SalVal
@@ -228,7 +230,7 @@ sal'defn env ast@(ref@(SalRef _) : (args@(SalLitList _) : (_ : _))) =
 sal'println :: SalFnI
 sal'println values = do
   putStrLn (unwords $ map show values)
-  pure SalNil
+  return SalNil
 
 sal'type :: SalFnI
 sal'type [val] = sal'keyword $ typeOf val
@@ -242,6 +244,9 @@ sal'type [val] = sal'keyword $ typeOf val
   typeOf (SalMacro _) = "macro"
   typeOf (SalFunction _) = "function"
 
+sal'nil :: SalFnI
+sal'nil [value] = sal'bool $ value == SalNil
+
 sal'sum :: SalFnI
 sal'sum = sal'number . sum . map sal'castNumber
 sal'sub :: SalFnI
@@ -251,10 +256,10 @@ sal'mul = sal'number . product . map sal'castNumber
 sal'div :: SalFnI
 sal'div = sal'number . foldl1 (/) . map sal'castNumber
 
-sal'abs :: SalFnI
-sal'abs [SalNumber a] = sal'number $ abs a
 sal'mod :: SalFnI
 sal'mod [SalNumber a, SalNumber b] = sal'number $ mod' a b
+sal'abs :: SalFnI
+sal'abs [SalNumber a] = sal'number $ abs a
 
 sal'inc :: SalFnI
 sal'inc [SalNumber a] = sal'number $ succ a
@@ -288,9 +293,6 @@ sal'not [value] = sal'bool . not $ sal'castBool value
 sal'noteq :: SalFnI
 sal'noteq [a, b] = sal'eq [a, b] >>= \c -> sal'not [c]
 
-sal'nil :: SalFnI
-sal'nil [value] = sal'bool $ value == SalNil
-
 sal'str :: SalFnI
 sal'str = sal'string . concatMap show
 
@@ -305,12 +307,13 @@ prelude =
     , ("defn", SalMacro sal'defn)
     , ("println", SalFunction sal'println)
     , ("type", SalFunction sal'type)
+    , ("nil?", SalFunction sal'nil)
     , ("+", SalFunction sal'sum)
     , ("-", SalFunction sal'sub)
     , ("*", SalFunction sal'mul)
     , ("/", SalFunction sal'div)
-    , ("abs", SalFunction sal'abs)
     , ("mod", SalFunction sal'mod)
+    , ("abs", SalFunction sal'abs)
     , ("inc", SalFunction sal'inc)
     , ("dec", SalFunction sal'dec)
     , ("max", SalFunction sal'max)
@@ -324,7 +327,6 @@ prelude =
     , ("and", SalFunction sal'and)
     , ("not", SalFunction sal'not)
     , ("not=", SalFunction sal'noteq)
-    , ("nil?", SalFunction sal'nil)
     ]
 
 --------------------------------------------------------------------------------

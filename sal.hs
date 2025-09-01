@@ -326,6 +326,7 @@ prelude =
     , ("and", SalFunction sal'and)
     , ("not", SalFunction sal'not)
     , ("not=", SalFunction sal'noteq)
+    , ("str", SalFunction sal'str)
     ]
 
 --------------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import Data.Set qualified as Set
 
 import Control.Monad (void)
 import System.Environment (getArgs)
+import System.IO (hFlush, stdout)
 
 --------------------------------------------------------------------------------
 -- DATA
@@ -209,13 +210,11 @@ sal'if env [cond, true, false] =
 
 sal'fn :: SalMcI
 sal'fn env ast@(SalLitList _ : (_ : _)) = sal'fn env (SalRef "" : ast)
-sal'fn env (SalRef kw : SalLitList args'keys : ast@(_ : _)) = pure (env, [SalLit fn'])
+sal'fn env (SalRef kw : SalLitList keys : ast@(_ : _)) = pure (env, [SalLit fn'])
  where
-  fn' = SalFunction fn'cls
-  fn'cls args'values = last . snd <$> run (fn'env args'values) ast
-  fn'env args'values = foldl env'ref env' $ zip args'keys args'values
+  fn' = SalFunction $ \args -> last . snd <$> run (fn'env args) ast
+  fn'env args = foldl (\e (SalRef k, v) -> Map.insert k v e) env' $ zip keys args
   env' = Map.insert "recur" fn' $ if kw == "" then env else Map.insert kw fn' env
-  env'ref e (SalRef k, v) = Map.insert k v e
 
 sal'def :: SalMcI
 sal'def env [SalRef kw, ast] =
@@ -340,10 +339,13 @@ eval' :: SalEnv -> String -> IO (SalEnv, [SalVal])
 eval' env = run env . parse . tokenize
 
 repl :: IO ()
-repl = loop prelude 1
+repl = do
+  putStrLn "Simply Another Lisp"
+  loop prelude 1
  where
   loop env line = do
     putStr $ "sal:" ++ show line ++ "> "
+    hFlush stdout
     (env', vals) <- getLine >>= eval' env
     mapM_ print vals
     loop env' $ succ line
@@ -352,9 +354,5 @@ main :: IO ()
 main = do
   args <- getArgs
   case args of
-    [file] -> do
-      code <- readFile file
-      void $ eval code
-    [] -> do
-      putStrLn "Sal's Another Lisp"
-      repl
+    [file] -> readFile file >>= void . eval
+    [] -> repl
